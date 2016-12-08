@@ -40,7 +40,7 @@ class worker : public execution_unit {
 public:
   using job_ptr = resumable*;
   using coordinator_ptr = coordinator<Policy>*;
-  using policy_data = typename Policy::worker_data;
+  using policy_data = typename Policy::template worker_data<worker<Policy>>;
 
   worker(size_t worker_id, coordinator_ptr worker_parent, size_t throughput)
       : execution_unit(&worker_parent->system()),
@@ -110,6 +110,7 @@ private:
   void run() {
     CAF_SET_LOGGER_SYS(&system());
     CAF_LOG_TRACE(CAF_ARG(id_));
+    policy_.init_worker_thread(this);
     // scheduling loop
     for (;;) {
       auto job = policy_.dequeue(this);
