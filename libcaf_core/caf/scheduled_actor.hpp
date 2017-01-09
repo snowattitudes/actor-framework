@@ -377,6 +377,9 @@ protected:
   exception_handler exception_handler_;
 # endif // CAF_NO_EXCEPTIONS
 
+  /// Stores the home execution unit.
+  execution_unit* home_eu_;
+
   /// @endcond
 };
 

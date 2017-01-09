@@ -158,18 +158,6 @@ behavior spawn_serv_impl(event_based_actor* self) {
   };
 }
 
-class dropping_execution_unit : public execution_unit {
-public:
-  dropping_execution_unit(actor_system* sys) : execution_unit(sys) {
-    // nop
-  }
-
-  void exec_later(resumable*) override {
-    // should not happen in the first place
-    CAF_LOG_ERROR("actor registry actor called exec_later during shutdown");
-  }
-};
-
 } // namespace <anonymous>
 
 actor_system::module::~module() {
