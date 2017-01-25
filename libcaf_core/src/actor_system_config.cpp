@@ -133,7 +133,7 @@ actor_system_config::actor_system_config()
   .add(work_stealing_relaxed_sleep_duration_us, "relaxed-sleep-duration",
        "sets the sleep interval between poll attempts during relaxed polling");
   opt_group{options_, "numa"}
-  .add(numa_aware_work_stealing_neighborhood_level, "numa-neighborhood-level",
+  .add(numa_aware_work_stealing_neighborhood_level, "neighborhood-level",
        "defines the neighborhood radius (0=all, 1=next smaller group, 2=...)");
   opt_group{options_, "logger"}
   .add(logger_filename, "filename",
