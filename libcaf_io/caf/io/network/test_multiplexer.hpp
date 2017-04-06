@@ -154,6 +154,9 @@ public:
   /// Executes all pending `runnable` objects.
   void flush_runnables();
 
+  /// Closes a connection.
+  void close(connection_handle hdl);
+
 protected:
   void exec_later(resumable* ptr) override;
 
