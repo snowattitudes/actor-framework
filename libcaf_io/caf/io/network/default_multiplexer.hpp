@@ -120,13 +120,12 @@ namespace network {
 
 // kqueue vs poll vs epoll backend
 #if defined(CAF_MACOS) || defined(CAF_BSD)
-  constexpr int input_mask  = EVFILT_READ;
-  constexpr int error_mask  = 0xFF;
-  constexpr int output_mask = EVFILT_WRITE;
+  constexpr int input_mask  = 0x01;
+  constexpr int output_mask = 0x02;
+  constexpr int error_mask  = 0x04;
+  // we use the shadow data to store the changeset for kqueue
   using multiplexer_data = struct kevent;
-  using multiplexer_poll_shadow_data = unit_t;
-  static_assert(input_mask != error_mask && output_mask && error_mask,
-                "ambiguous error mask");
+  using multiplexer_poll_shadow_data = std::vector<struct kevent>;
 #elif !defined(CAF_LINUX) || defined(CAF_POLL_IMPL) // poll() multiplexer
 # ifdef CAF_WINDOWS
     // From the MSDN: If the POLLPRI flag is set on a socket for the Microsoft

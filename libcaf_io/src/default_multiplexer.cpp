@@ -299,7 +299,7 @@ namespace network {
     pollset_.emplace_back();
     auto ke = &pollset_.back();
     EV_SET(ke, pipe_reader_.fd(), EVFILT_READ, EV_ADD, 0, 0, &pipe_reader_);
-    if (::kevent(loopfd_, ke, 1, nullptr, 0, nullptr) < 0) {
+    if (kevent(loopfd_, ke, 1, nullptr, 0, nullptr) < 0) {
       CAF_LOG_ERROR("kqueue: " << strerror(errno));
       CAF_CRITICAL("kevent() failed");
     }
@@ -307,9 +307,11 @@ namespace network {
 
   void default_multiplexer::run() {
     CAF_LOG_TRACE("kqueue()-based multiplexer");
+    pollset_.resize(20);
     while (!pollset_.empty()) {
-      int nev = kevent(loopfd_, nullptr, 0, pollset_.data(),
-                       static_cast<int>(pollset_.size()), nullptr);
+      int nev = kevent(loopfd_, shadow_.data(), static_cast<int>(shadow_.size()),
+                       pollset_.data(),static_cast<int>(pollset_.size()),
+                       nullptr);
       CAF_LOG_DEBUG("kevent() on " << CAF_ARG(pollset_.size())
                     << " sockets reported " << CAF_ARG(nev)
                     << " event(s)");
@@ -321,30 +323,21 @@ namespace network {
             CAF_LOG_ERROR("kevent: " << strerror(errno));
             CAF_CRITICAL("kevent() failed");
         }
+      shadow_.clear();
       auto iter = pollset_.begin();
       auto last = iter + nev;
       for (; iter != last; ++iter) {
         auto ptr = reinterpret_cast<event_handler*>(iter->udata);
         CAF_ASSERT(ptr != nullptr);
-        int fd = iter->ident;
-        // We're not dispatching to handle_socket_event here, because it would
-        // need to be changed to accommodate kqueue's API, which uses two
-        // variables for error flag and descriptor signaling.
-        if ((iter->flags & EV_ERROR) || (iter->flags & EV_EOF)) {
-          CAF_LOG_DEBUG("error occured on socket:"
-                        << CAF_ARG(fd) << CAF_ARG(last_socket_error())
-                        << CAF_ARG(last_socket_error_as_string()));
-          ptr->handle_event(operation::propagate_error);
-          del(operation::read, fd, ptr);
-          del(operation::write, fd, ptr);
-        } else {
-          if (iter->filter & EVFILT_READ) {
-            CAF_ASSERT(!ptr->read_channel_closed());
-            ptr->handle_event(operation::read);
-          }
-          if (iter->filter & EVFILT_WRITE)
-            ptr->handle_event(operation::write);
-        }
+        auto fd = static_cast<native_socket>(iter->ident);
+        int mask = 0;
+        if (iter->filter == EVFILT_READ)
+          mask = input_mask;
+        else if (iter->filter == EVFILT_WRITE)
+          mask = output_mask;
+        if ((iter->flags & EV_ERROR) || (iter->flags & EV_EOF))
+          mask |= error_mask;
+        handle_socket_event(fd, mask, ptr);
       }
       for (auto& me : events_)
         handle(me);
@@ -358,58 +351,42 @@ namespace network {
     // ptr is only allowed to nullptr if fd is our pipe
     // read handle which is only registered for input
     CAF_ASSERT(e.ptr != nullptr || e.fd == pipe_.first);
-    if (e.ptr && e.ptr->eventbf() == e.mask)
+    if (e.ptr != nullptr && e.ptr->eventbf() == e.mask)
       return;
-    auto old = e.ptr ? e.ptr->eventbf() : input_mask;
+    auto old = e.ptr != nullptr ? e.ptr->eventbf() : input_mask;
     if (e.ptr)
       e.ptr->eventbf(e.mask);
-    struct kevent ke;
-    EV_SET(&ke, e.fd, e.mask, 0, 0, 0, e.ptr);
-    auto fd_equal = [&](const struct kevent& x) {
-      return static_cast<int>(x.ident) == e.fd;
+    auto kqueue_update = [&](unsigned short flag, short filter) {
+      CAF_ASSERT(flag == EV_ADD || flag == EV_DELETE);
+      CAF_ASSERT(filter == EVFILT_WRITE || filter == EVFILT_READ);
+      struct kevent ke;
+      EV_SET(&ke, e.fd, filter, flag, 0, 0, e.ptr);
+      shadow_.emplace_back(std::move(ke));
     };
     if (e.mask == 0) {
       CAF_LOG_DEBUG("attempt to remove socket " << CAF_ARG(e.fd)
                     << " from kqueue");
-      ke.filter = old;
-      ke.flags = EV_DELETE;
-      pollset_.erase(std::remove_if(pollset_.begin(), pollset_.end(), fd_equal),
-                    pollset_.end());
+      if (old & output_mask)
+        kqueue_update(EV_DELETE, EVFILT_WRITE);
+      if (old & input_mask)
+        kqueue_update(EV_DELETE, EVFILT_READ);
     } else if (old == 0) {
       CAF_LOG_DEBUG("attempt to add socket " << CAF_ARG(e.fd) << " to kqueue");
-      ke.flags = EV_ADD;
-      pollset_.push_back(ke);
+      if (e.mask & output_mask)
+        kqueue_update(EV_ADD, EVFILT_WRITE);
+      if (e.mask & input_mask)
+        kqueue_update(EV_ADD, EVFILT_READ);
     } else {
       CAF_LOG_DEBUG("modify kqueue event mask for socket " << CAF_ARG(e.fd)
                     << ": " << CAF_ARG(old) << " -> " << CAF_ARG(e.mask));
-      ke.flags = EV_ADD;
-      // Within kqueue, an event is identified by the (fd, mask) pair. If the
-      // mask changes, we must first delete the old pair and then re-insert the
-      // changed one.
-      auto i = std::find_if(pollset_.begin(), pollset_.end(), fd_equal);
-      CAF_ASSERT(i != pollset_.end());
-      i->flags = EV_DELETE;
-      if (::kevent(loopfd_, &*i, 1, nullptr, 0, nullptr) < 0)
-        switch (last_socket_error()) {
-          default:
-            CAF_LOG_ERROR("kqueue: " << strerror(errno));
-            CAF_CRITICAL("kevent() failed");
-          // The event could not be found to be modified or deleted.
-          case ENOENT:
-            CAF_LOG_ERROR("kqueue: cannot delete unregistered file descriptor");
-            CAF_CRITICAL("kevent() failed");
-        }
-    }
-    if (::kevent(loopfd_, &ke, 1, nullptr, 0, nullptr) < 0) {
-      switch (last_socket_error()) {
-        default:
-          CAF_LOG_ERROR("kqueue: " << strerror(errno));
-          CAF_CRITICAL("kevent() failed");
-        // The event could not be found to be modified or deleted.
-        case ENOENT:
-          CAF_LOG_ERROR("kqueue: cannot delete unregistered file descriptor");
-          CAF_CRITICAL("kevent() failed");
-      }
+      if (!(old & output_mask) && (e.mask & output_mask))
+        kqueue_update(EV_ADD, EVFILT_WRITE);
+      if ((old & output_mask) && !(e.mask & output_mask))
+        kqueue_update(EV_DELETE, EVFILT_WRITE);
+      if (!(old & input_mask) && (e.mask & input_mask))
+        kqueue_update(EV_ADD, EVFILT_READ);
+      if ((old & input_mask) && !(e.mask & input_mask))
+        kqueue_update(EV_DELETE, EVFILT_READ);
     }
     if (e.ptr) {
       auto remove_from_loop_if_needed = [&](int flag, operation flag_op) {
