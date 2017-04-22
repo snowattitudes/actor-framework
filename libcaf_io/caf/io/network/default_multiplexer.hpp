@@ -125,7 +125,10 @@ namespace network {
   constexpr int error_mask  = 0x04;
   // we use the shadow data to store the changeset for kqueue
   using multiplexer_data = struct kevent;
-  using multiplexer_poll_shadow_data = std::vector<struct kevent>;
+  struct multiplexer_poll_shadow_data {
+    std::vector<struct kevent> changes;
+    size_t fds;
+  };
 #elif !defined(CAF_LINUX) || defined(CAF_POLL_IMPL) // poll() multiplexer
 # ifdef CAF_WINDOWS
     // From the MSDN: If the POLLPRI flag is set on a socket for the Microsoft

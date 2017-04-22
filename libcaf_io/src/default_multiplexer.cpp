@@ -303,14 +303,16 @@ namespace network {
       CAF_LOG_ERROR("kqueue: " << strerror(errno));
       CAF_CRITICAL("kevent() failed");
     }
+    shadow_.fds = 1;
   }
 
   void default_multiplexer::run() {
     CAF_LOG_TRACE("kqueue()-based multiplexer");
     pollset_.resize(20);
-    while (!pollset_.empty()) {
-      int nev = kevent(loopfd_, shadow_.data(), static_cast<int>(shadow_.size()),
-                       pollset_.data(),static_cast<int>(pollset_.size()),
+    while (shadow_.fds > 0) {
+      int nev = kevent(loopfd_, shadow_.changes.data(),
+                       static_cast<int>(shadow_.changes.size()),
+                       pollset_.data(), static_cast<int>(pollset_.size()),
                        nullptr);
       CAF_LOG_DEBUG("kevent() on " << CAF_ARG(pollset_.size())
                     << " sockets reported " << CAF_ARG(nev)
@@ -323,21 +325,23 @@ namespace network {
             CAF_LOG_ERROR("kevent: " << strerror(errno));
             CAF_CRITICAL("kevent() failed");
         }
-      shadow_.clear();
+      shadow_.changes.clear();
       auto iter = pollset_.begin();
       auto last = iter + nev;
       for (; iter != last; ++iter) {
         auto ptr = reinterpret_cast<event_handler*>(iter->udata);
         CAF_ASSERT(ptr != nullptr);
         auto fd = static_cast<native_socket>(iter->ident);
-        int mask = 0;
-        if (iter->filter == EVFILT_READ)
-          mask = input_mask;
-        else if (iter->filter == EVFILT_WRITE)
-          mask = output_mask;
-        if ((iter->flags & EV_ERROR) || (iter->flags & EV_EOF))
-          mask |= error_mask;
-        handle_socket_event(fd, mask, ptr);
+        if (!(iter->flags & EV_DELETE)) {
+          int mask = 0;
+          if (iter->filter == EVFILT_READ)
+            mask = input_mask;
+          else if (iter->filter == EVFILT_WRITE)
+            mask = output_mask;
+          if ((iter->flags & EV_ERROR) || (iter->flags & EV_EOF))
+            mask |= error_mask;
+          handle_socket_event(fd, mask, ptr);
+        }
       }
       for (auto& me : events_)
         handle(me);
@@ -361,23 +365,25 @@ namespace network {
       CAF_ASSERT(filter == EVFILT_WRITE || filter == EVFILT_READ);
       struct kevent ke;
       EV_SET(&ke, e.fd, filter, flag, 0, 0, e.ptr);
-      shadow_.emplace_back(std::move(ke));
+      shadow_.changes.emplace_back(std::move(ke));
     };
     if (e.mask == 0) {
-      CAF_LOG_DEBUG("attempt to remove socket " << CAF_ARG(e.fd)
-                    << " from kqueue");
+      CAF_LOG_DEBUG("attempt to remove socket" << CAF_ARG(e.fd)
+                    << "from kqueue");
+      --shadow_.fds;
       if (old & output_mask)
         kqueue_update(EV_DELETE, EVFILT_WRITE);
       if (old & input_mask)
         kqueue_update(EV_DELETE, EVFILT_READ);
     } else if (old == 0) {
-      CAF_LOG_DEBUG("attempt to add socket " << CAF_ARG(e.fd) << " to kqueue");
+      CAF_LOG_DEBUG("attempt to add socket" << CAF_ARG(e.fd) << "to kqueue");
+      ++shadow_.fds;
       if (e.mask & output_mask)
         kqueue_update(EV_ADD, EVFILT_WRITE);
       if (e.mask & input_mask)
         kqueue_update(EV_ADD, EVFILT_READ);
     } else {
-      CAF_LOG_DEBUG("modify kqueue event mask for socket " << CAF_ARG(e.fd)
+      CAF_LOG_DEBUG("modify kqueue event mask for socket" << CAF_ARG(e.fd)
                     << ": " << CAF_ARG(old) << " -> " << CAF_ARG(e.mask));
       if (!(old & output_mask) && (e.mask & output_mask))
         kqueue_update(EV_ADD, EVFILT_WRITE);
