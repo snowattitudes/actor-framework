@@ -301,15 +301,15 @@ namespace network {
     EV_SET(ke, pipe_reader_.fd(), EVFILT_READ, EV_ADD, 0, 0, &pipe_reader_);
     if (kevent(loopfd_, ke, 1, nullptr, 0, nullptr) < 0) {
       CAF_LOG_ERROR("kqueue: " << strerror(errno));
-      CAF_CRITICAL("kevent() failed");
+      CAF_CRITICAL("kqueue() failed");
     }
-    shadow_.fds = 1;
+    shadow_.fds.push_back(pipe_reader_.fd());
   }
 
   void default_multiplexer::run() {
     CAF_LOG_TRACE("kqueue()-based multiplexer");
     pollset_.resize(20);
-    while (shadow_.fds > 0) {
+    while (!shadow_.fds.empty()) {
       int nev = kevent(loopfd_, shadow_.changes.data(),
                        static_cast<int>(shadow_.changes.size()),
                        pollset_.data(), static_cast<int>(pollset_.size()),
@@ -320,29 +320,41 @@ namespace network {
       if (nev < 0)
         switch (errno) {
           case EINTR:
+            shadow_.changes.clear(); // all changes guaranteed to be applied
             continue;
           default:
             CAF_LOG_ERROR("kevent: " << strerror(errno));
-            CAF_CRITICAL("kevent() failed");
         }
       shadow_.changes.clear();
       auto iter = pollset_.begin();
       auto last = iter + nev;
       for (; iter != last; ++iter) {
+        auto fd = static_cast<native_socket>(iter->ident);
         auto ptr = reinterpret_cast<event_handler*>(iter->udata);
         CAF_ASSERT(ptr != nullptr);
-        auto fd = static_cast<native_socket>(iter->ident);
-        if (!(iter->flags & EV_DELETE)) {
-          int mask = 0;
-          if (iter->filter == EVFILT_READ)
-            mask = input_mask;
-          else if (iter->filter == EVFILT_WRITE)
-            mask = output_mask;
-          if ((iter->flags & EV_ERROR) || (iter->flags & EV_EOF))
-            mask |= error_mask;
-          handle_socket_event(fd, mask, ptr);
+        if (iter->flags & EV_ERROR || iter->flags & EV_EOF) {
+          CAF_LOG_DEBUG("error occured on socket:"
+                        << CAF_ARG(fd) << CAF_ARG(iter->data)
+                        << CAF_ARG(strerror(iter->data)));
+          auto i = std::lower_bound(shadow_.fds.begin(), shadow_.fds.end(), fd);
+          if (i != shadow_.fds.end() && *i == fd) {
+            ptr->handle_event(operation::propagate_error);
+            shadow_.fds.erase(i);
+          }
+          // Pending events for the failed handler are no longer relevant.
+          auto e = std::lower_bound(events_.begin(), events_.end(), fd,
+                                    event_less{});
+          while (e != events_.end() && e->fd == fd)
+            e = events_.erase(e);
+        } else if (iter->filter == EVFILT_READ && !ptr->read_channel_closed()) {
+          ptr->handle_event(operation::read);
+        } else if (iter->filter == EVFILT_WRITE) {
+          ptr->handle_event(operation::write);
+        } else {
+          CAF_ASSERT(!"unexpected kevent filter");
         }
       }
+      // Handle accumulated events.
       for (auto& me : events_)
         handle(me);
       events_.clear();
@@ -370,18 +382,22 @@ namespace network {
     if (e.mask == 0) {
       CAF_LOG_DEBUG("attempt to remove socket" << CAF_ARG(e.fd)
                     << "from kqueue");
-      --shadow_.fds;
       if (old & output_mask)
         kqueue_update(EV_DELETE, EVFILT_WRITE);
       if (old & input_mask)
         kqueue_update(EV_DELETE, EVFILT_READ);
+      auto i = std::lower_bound(shadow_.fds.begin(), shadow_.fds.end(), e.fd);
+      if (i != shadow_.fds.end() && *i == e.fd)
+        shadow_.fds.erase(i);
     } else if (old == 0) {
       CAF_LOG_DEBUG("attempt to add socket" << CAF_ARG(e.fd) << "to kqueue");
-      ++shadow_.fds;
       if (e.mask & output_mask)
         kqueue_update(EV_ADD, EVFILT_WRITE);
       if (e.mask & input_mask)
         kqueue_update(EV_ADD, EVFILT_READ);
+      auto i = std::lower_bound(shadow_.fds.begin(), shadow_.fds.end(), e.fd);
+      if (i == shadow_.fds.end() || *i != e.fd)
+        shadow_.fds.insert(i, e.fd);
     } else {
       CAF_LOG_DEBUG("modify kqueue event mask for socket" << CAF_ARG(e.fd)
                     << ": " << CAF_ARG(old) << " -> " << CAF_ARG(e.mask));
