@@ -150,28 +150,6 @@ private:
   const Tup& xs_;
 };
 
-template <class T>
-struct match_helper {
-  T& ref;
-
-  template <class... Fs>
-  void operator()(Fs... fs) {
-    struct impl : Fs... {
-      using result_type = void;
-      impl(Fs... xs) : Fs(xs)... {
-        // nop
-      }
-    };
-    impl visitor{std::move(fs)...};
-    apply_visitor(ref, visitor);
-  }
-};
-
-template <class T>
-match_helper<T> match(T& x) {
-  return {x};
-}
-
 template <class Derived>
 class expect_clause_base {
 public:
@@ -543,15 +521,6 @@ struct test_coordinator_fixture {
   CAF_MESSAGE("expect" << #types << "." << #fields);                           \
   expect_clause< CAF_EXPAND(CAF_DSL_LIST types) >{sched} . fields
 
-#define expect_on(where, types, fields)                                        \
-  CAF_MESSAGE(#where << ": expect" << #types << "." << #fields);               \
-  expect_clause< CAF_EXPAND(CAF_DSL_LIST types) >{where . sched} . fields
-
 #define disallow(types, fields)                                                \
   CAF_MESSAGE("disallow" << #types << "." << #fields);                         \
   disallow_clause< CAF_EXPAND(CAF_DSL_LIST types) >{sched} . fields
-
-#define disallow_on(where, types, fields)                                      \
-  CAF_MESSAGE(#where << ": disallow" << #types << "." << #fields);             \
-  disallow_clause< CAF_EXPAND(CAF_DSL_LIST types) >{where . sched} . fields
-
